@@ -2,8 +2,9 @@ import { db } from './db';
 import type { WoodBoard } from '../types/wood-board';
 import type { SoundChamber } from '../types/sound-chamber';
 import type { LacquerLayer } from '../types/lacquer-layer';
+import type { LacquerReceipt } from '../types/lacquer-receipt';
 import type { Stringing } from '../types/stringing';
-import { cumulativeThickness } from './layer';
+import { rowsOfGuqin, withSettledCumulative } from './reconcile';
 
 const DAY = 86_400_000;
 const daysAgo = (n: number) => new Date(Date.now() - n * DAY).toISOString();
@@ -30,30 +31,38 @@ export const SEED_CHAMBERS: SoundChamber[] = [
 ];
 
 function buildSeedLayers(): LacquerLayer[] {
-  const plan: Array<[string, string, number, number, number, number, number, string]> = [
-    // guqinNo, mixRatio, temp, humidity, grit, thicknessMm, daysAgo, operator
-    ['Q-2501', '1:1', 24, 78, 240, 0.12, 70, '林听雪'],
-    ['Q-2501', '1:1', 25, 80, 320, 0.1, 58, '林听雪'],
-    ['Q-2501', '1:1.2', 26, 82, 400, 0.09, 40, '林听雪'],
-    ['Q-2502', '1:1', 23, 76, 240, 0.13, 62, '林听雪'],
-    ['Q-2502', '1:1.5', 27, 84, 400, 0.11, 45, '周砚秋'],
-    ['Q-2502', '1:1.5', 25, 80, 600, 0.08, 30, '周砚秋'],
-    ['Q-2503', '1:1.2', 22, 74, 240, 0.12, 48, '林听雪'],
-    ['Q-2503', '1:1.2', 26, 82, 400, 0.1, 33, '林听雪'],
-    ['Q-2504', '1:1', 24, 79, 320, 0.12, 36, '周砚秋'],
-    ['Q-2504', '1:1.5', 28, 85, 600, 0.09, 21, '周砚秋'],
-    ['Q-2501', '1:2', 18, 65, 800, 0.05, 18, '林听雪'],
-    ['Q-2502', '纯生漆', 24, 70, 1000, 0.04, 12, '周砚秋'],
+  // 历史遍次大多不带 source（由 v3 升级/读取按本坊兼容）；仅明确的外协遍打标。
+  const plan: Array<[string, string, number, number, number, number, number, string, LacquerLayer['source'], LacquerLayer['reconcileState']?]> = [
+    // guqinNo, mixRatio, temp, humidity, grit, thicknessMm, daysAgo, operator, source, reconcile
+    ['Q-2501', '1:1', 24, 78, 240, 0.12, 70, '林听雪', undefined],
+    ['Q-2501', '1:1', 25, 80, 320, 0.1, 58, '林听雪', undefined],
+    ['Q-2501', '1:1.2', 26, 82, 400, 0.09, 40, '林听雪', undefined],
+    ['Q-2502', '1:1', 23, 76, 240, 0.13, 62, '林听雪', undefined],
+    ['Q-2502', '1:1.5', 27, 84, 400, 0.11, 45, '周砚秋', undefined],
+    ['Q-2502', '1:1.5', 25, 80, 600, 0.08, 30, '周砚秋', undefined],
+    ['Q-2503', '1:1.2', 22, 74, 240, 0.12, 48, '林听雪', undefined],
+    ['Q-2503', '1:1.2', 26, 82, 400, 0.1, 33, '林听雪', undefined],
+    ['Q-2504', '1:1', 24, 79, 320, 0.12, 36, '周砚秋', undefined],
+    ['Q-2504', '1:1.5', 28, 85, 600, 0.09, 21, '周砚秋', undefined],
+    ['Q-2501', '1:2', 18, 65, 800, 0.05, 18, '林听雪', undefined],
+    ['Q-2502', '纯生漆', 24, 70, 1000, 0.04, 12, '周砚秋', undefined],
+    // Q-2503 第 3 遍交外协，回执与本坊一致，已采用外协值核销
+    ['Q-2503', '1:1.5', 25, 80, 600, 0.11, 20, '徽城漆坊', 'outsource', 'resolved-outsource'],
+    // Q-2504 第 3 遍交外协，回执厚度/日期与本坊不符，待复核（不计入累计）
+    ['Q-2504', '1:1.5', 25, 80, 600, 0.11, 10, '周砚秋', undefined, 'disputed'],
   ];
 
   const seqMap = new Map<string, number>();
-  return plan.map(([guqinNo, mixRatio, temp, humidity, grit, thickness, days, operator], index) => {
+  return plan.map(([guqinNo, mixRatio, temp, humidity, grit, thickness, days, operator, source, reconcile], index) => {
     const seq = (seqMap.get(guqinNo) ?? 0) + 1;
     seqMap.set(guqinNo, seq);
     return {
       id: `layer-${String(index + 1).padStart(3, '0')}`,
       guqinNo,
       seq,
+      ...(source ? { source } : {}),
+      ...(reconcile ? { reconcileState: reconcile } : {}),
+      ...(reconcile === 'resolved-outsource' ? { receiptId: `receipt-${String(index + 1).padStart(3, '0')}` } : {}),
       mixRatio,
       curingTemp: temp,
       curingHumidity: humidity,
@@ -66,18 +75,66 @@ function buildSeedLayers(): LacquerLayer[] {
   });
 }
 
-/** 重新计算每张琴的累计厚度（写入本地库前的派生值） */
-export function withCumulative(layers: LacquerLayer[]): LacquerLayer[] {
-  const byGuqin = new Map<string, LacquerLayer[]>();
-  layers.forEach((layer) => {
-    const list = byGuqin.get(layer.guqinNo) ?? [];
-    list.push(layer);
-    byGuqin.set(layer.guqinNo, list);
+/** 外协漆坊回执示例：一致、冲突、重复送达、孤儿回执（本坊无此遍）各一 */
+function buildSeedReceipts(layers: LacquerLayer[]): LacquerReceipt[] {
+  const at = (layer: LacquerLayer | undefined) => layer?.appliedAt ?? new Date().toISOString();
+  const find = (guqinNo: string, seq: number) => layers.find((l) => l.guqinNo === guqinNo && l.seq === seq);
+  const make = (
+    id: string,
+    receiptNo: string,
+    workshop: string,
+    batchNo: string,
+    guqinNo: string,
+    seq: number,
+    thickness: number,
+    mixRatio: string,
+    appliedAt: string,
+    mergedCount = 0,
+    operator?: string,
+  ): LacquerReceipt => ({
+    id,
+    receiptNo,
+    workshop,
+    localBatchNo: batchNo,
+    guqinNo,
+    seq,
+    layerThickness: thickness,
+    mixRatio,
+    appliedAt,
+    receivedAt: daysAgo(8),
+    mergedCount,
+    lastReceivedAt: daysAgo(mergedCount ? 2 : 8),
+    ...(operator ? { operator } : {}),
   });
-  return layers.map((layer) => ({
-    ...layer,
-    totalThickness: cumulativeThickness(byGuqin.get(layer.guqinNo) ?? [], layer.seq),
-  }));
+
+  return [
+    // Q-2503 第 3 遍：与本坊记录一致（0.11 / 1:1.5），已核销采用外协值
+    make('receipt-013', 'WX-3301', '徽城漆坊', 'DB-7781', 'Q-2503', 3, 0.11, '1:1.5', at(find('Q-2503', 3)), 1, '徽城漆坊'),
+    // Q-2504 第 3 遍：回执厚度 0.15、日期早一天，与本坊 0.11 冲突，待复核
+    make('receipt-014', 'WX-4402', '徽城漆坊', 'DB-7790', 'Q-2504', 3, 0.15, '1:1.5', daysAgo(9), 0, '徽城漆坊'),
+    // Q-2501 第 4 遍：本坊已做（0.05），外协也送来一张同遍回执（0.06），且重复送达一次
+    make('receipt-011', 'WX-1104', "婺源永胜漆坊", 'DB-7802', 'Q-2501', 4, 0.06, '1:2', at(find('Q-2501', 4)), 1, '永胜漆坊'),
+    // 孤儿回执：Q-2505 第 1 遍只有外协回执，本坊遍次尚未入册
+    make('receipt-015', 'WX-5501', '徽城漆坊', 'DB-7810', 'Q-2505', 1, 0.13, '1:1', daysAgo(6), 0, '徽城漆坊'),
+  ];
+}
+
+/** 重新计算每张琴的累计厚度：未决遍次不参与累计，并沿用上一已核销遍累计值 */
+export function withCumulative(layers: LacquerLayer[], receipts: LacquerReceipt[] = []): LacquerLayer[] {
+  const guqinSet = new Set(layers.map((l) => l.guqinNo));
+  let result = new Map<string, LacquerLayer>();
+  layers.forEach((l) => result.set(l.id, l));
+  Array.from(guqinSet)
+    .sort()
+    .forEach((guqinNo) => {
+      const rows = rowsOfGuqin(
+        layers.filter((l) => l.guqinNo === guqinNo),
+        receipts.filter((r) => r.guqinNo === guqinNo),
+        guqinNo,
+      );
+      withSettledCumulative(rows).forEach((l) => result.set(l.id, l));
+    });
+  return layers.map((l) => result.get(l.id) ?? l);
 }
 
 export const SEED_STRINGINGS: Stringing[] = [
@@ -136,19 +193,27 @@ export async function seedIfEmpty(): Promise<void> {
   if (flag) {
     return;
   }
-  const [boardCount, chamberCount, lacquerCount, stringingCount] = await Promise.all([
+  const [boardCount, chamberCount, lacquerCount, receiptCount, stringingCount] = await Promise.all([
     db.boards.count(),
     db.chambers.count(),
     db.lacquers.count(),
+    db.lacquerReceipts.count(),
     db.stringings.count(),
   ]);
-  const layers = withCumulative(buildSeedLayers());
+  const rawLayers = buildSeedLayers();
+  const receipts = buildSeedReceipts(rawLayers);
+  const layers = withCumulative(rawLayers, receipts);
 
-  await db.transaction('rw', db.boards, db.chambers, db.lacquers, db.stringings, db.meta, async () => {
-    if (boardCount === 0) await db.boards.bulkPut(SEED_BOARDS);
-    if (chamberCount === 0) await db.chambers.bulkPut(SEED_CHAMBERS);
-    if (lacquerCount === 0) await db.lacquers.bulkPut(layers);
-    if (stringingCount === 0) await db.stringings.bulkPut(SEED_STRINGINGS);
-    await db.meta.put({ key: 'seeded', value: new Date().toISOString() });
-  });
+  await db.transaction(
+    'rw',
+    [db.boards, db.chambers, db.lacquers, db.lacquerReceipts, db.stringings, db.meta],
+    async () => {
+      if (boardCount === 0) await db.boards.bulkPut(SEED_BOARDS);
+      if (chamberCount === 0) await db.chambers.bulkPut(SEED_CHAMBERS);
+      if (lacquerCount === 0) await db.lacquers.bulkPut(layers);
+      if (receiptCount === 0) await db.lacquerReceipts.bulkPut(receipts);
+      if (stringingCount === 0) await db.stringings.bulkPut(SEED_STRINGINGS);
+      await db.meta.put({ key: 'seeded', value: new Date().toISOString() });
+    },
+  );
 }

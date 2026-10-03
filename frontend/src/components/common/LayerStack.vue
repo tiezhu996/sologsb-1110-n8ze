@@ -46,6 +46,13 @@ const remainLayers = computed(() => layersToTarget(props.layers, props.targetMm 
     </div>
     <el-table :data="layers" size="small" border>
       <el-table-column prop="seq" label="遍次" width="70" />
+      <el-table-column label="来源" width="90">
+        <template #default="scope">
+          <el-tag :type="scope.row.source === 'outsource' ? 'primary' : 'info'" size="small">
+            {{ scope.row.source === 'outsource' ? '外协' : '本坊' }}
+          </el-tag>
+        </template>
+      </el-table-column>
       <el-table-column prop="mixRatio" label="灰胎配比" width="110" />
       <el-table-column prop="layerThickness" label="本遍厚度(mm)" width="120" />
       <el-table-column prop="totalThickness" label="累计厚度(mm)" width="120" />

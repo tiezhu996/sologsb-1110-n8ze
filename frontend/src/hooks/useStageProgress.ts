@@ -3,7 +3,8 @@ import { useBoardStore } from '../stores/boardStore';
 import { useChamberStore } from '../stores/chamberStore';
 import { useLacquerStore } from '../stores/lacquerStore';
 import { useStringingStore } from '../stores/stringingStore';
-import { cumulativeThickness } from '../utils/layer';
+import { buildRows, isSettled, settledTotal } from '../utils/reconcile';
+import { LACQUER_STAGE_TARGET_MM } from '../utils/layer';
 
 export type StageKey = 'select' | 'carve' | 'lacquer' | 'string';
 
@@ -32,9 +33,6 @@ export const STAGE_LABELS: Record<StageKey, string> = {
   string: '上弦',
 };
 
-/** 灰胎完工目标累计厚度（mm） */
-const TARGET_MM = 1.0;
-
 /**
  * 按选材/掏膛/灰胎/上弦计算每张琴的阶段推进比与缺失项。
  * 选材：面板与底板配对齐全；掏膛：有槽腹记录；灰胎：累计厚度达标；上弦：有上弦记录。
@@ -50,6 +48,7 @@ export function useStageProgress() {
     boardStore.boards.forEach((b) => set.add(b.guqinNo));
     chamberStore.chambers.forEach((c) => set.add(c.guqinNo));
     lacquerStore.layers.forEach((l) => set.add(l.guqinNo));
+    lacquerStore.receipts.forEach((r) => set.add(r.guqinNo));
     stringingStore.stringings.forEach((s) => set.add(s.guqinNo));
     return Array.from(set).sort();
   });
@@ -61,7 +60,11 @@ export function useStageProgress() {
       const base = boards.find((b) => b.part === '底板');
       const chamber = chamberStore.chambers.find((c) => c.guqinNo === guqinNo);
       const layers = lacquerStore.layers.filter((l) => l.guqinNo === guqinNo);
-      const total = cumulativeThickness(layers);
+      const receipts = lacquerStore.receipts.filter((r) => r.guqinNo === guqinNo);
+      const rows = buildRows(layers, receipts);
+      const total = settledTotal(layers, receipts);
+      const pendingRows = rows.filter((r) => !isSettled(r.state));
+      const settledCount = rows.filter((r) => isSettled(r.state) && r.layer).length;
       const stringing = stringingStore.stringings.find((s) => s.guqinNo === guqinNo);
       const species = panel?.species ?? base?.species ?? '';
 
@@ -81,8 +84,13 @@ export function useStageProgress() {
         {
           key: 'lacquer',
           label: STAGE_LABELS.lacquer,
-          done: total >= TARGET_MM,
-          detail: layers.length ? `${layers.length} 遍，累计 ${total.toFixed(2)}mm / 目标 ${TARGET_MM}mm` : '尚未髹漆',
+          // 未决遍次不参与累计；有待复核遍次时灰胎不得视为完成，上弦环节也不会放行
+          done: pendingRows.length === 0 && total >= LACQUER_STAGE_TARGET_MM,
+          detail: pendingRows.length
+            ? `${settledCount} 遍已核销，累计 ${total.toFixed(2)}mm；${pendingRows.length} 遍待复核，未计入`
+            : rows.length
+              ? `${settledCount} 遍，累计 ${total.toFixed(2)}mm / 目标 ${LACQUER_STAGE_TARGET_MM}mm`
+              : '尚未髹漆',
         },
         {
           key: 'string',

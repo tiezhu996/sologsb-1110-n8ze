@@ -7,7 +7,9 @@ import EmptyPanel from '../components/common/EmptyPanel.vue';
 import ToneTextEditor from '../components/common/ToneTextEditor.vue';
 import { useStringingStore } from '../stores/stringingStore';
 import { useBoardStore } from '../stores/boardStore';
-import { formatDate } from '../utils/layer';
+import { useLacquerStore } from '../stores/lacquerStore';
+import { formatDate, LACQUER_STAGE_TARGET_MM } from '../utils/layer';
+import { rowsOfGuqin, isSettled } from '../utils/reconcile';
 import {
   NINE_VIRTUES,
   STRING_DEFECTS,
@@ -21,6 +23,7 @@ import {
 const route = useRoute();
 const stringingStore = useStringingStore();
 const boardStore = useBoardStore();
+const lacquerStore = useLacquerStore();
 
 const dialogVisible = ref(false);
 const editingId = ref('');
@@ -110,6 +113,23 @@ function openEdit(stringing: Stringing) {
 async function submit() {
   const ok = await formRef.value?.validate().catch(() => false);
   if (!ok) return;
+  // 灰胎未核销达标（含待复核遍次）时，不允许上弦环节把它当成完成
+  if (!editingId.value) {
+    const guqinNo = form.value.guqinNo.trim();
+    const rows = rowsOfGuqin(
+      lacquerStore.layers.filter((l) => l.guqinNo === guqinNo),
+      lacquerStore.receipts.filter((r) => r.guqinNo === guqinNo),
+      guqinNo,
+    );
+    const pending = rows.filter((r) => !isSettled(r.state));
+    if (!lacquerStore.isLacquerReady(guqinNo)) {
+      const reason = pending.length
+        ? `该琴有 ${pending.length} 遍灰胎待复核（厚度/配比/日期对不上或仅有外协回执），未决遍次不计入累计`
+        : `该琴有效累计灰胎厚度未达 ${LACQUER_STAGE_TARGET_MM}mm`;
+      ElMessage.error(`暂不能登记上弦：${reason}。请先到「灰胎髹漆」页完成对账核销。`);
+      return;
+    }
+  }
   const payload = {
     guqinNo: form.value.guqinNo,
     stringType: form.value.stringType,

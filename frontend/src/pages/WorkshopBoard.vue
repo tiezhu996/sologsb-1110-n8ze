@@ -10,6 +10,7 @@ import { useChamberStore } from '../stores/chamberStore';
 import { useLacquerStore } from '../stores/lacquerStore';
 import { useStringingStore } from '../stores/stringingStore';
 import { formatDate } from '../utils/layer';
+import { buildRows, isSettled } from '../utils/reconcile';
 import { WOOD_SPECIES } from '../types/wood-board';
 import type { TimelineEvent } from '../types/ui';
 
@@ -54,12 +55,14 @@ const events = computed<TimelineEvent[]>(() => {
       type: 'primary',
     });
   });
-  lacquerStore.layers.forEach((layer) => {
+  // 未决遍次（待复核 / 仅回执）不作为已完成工序播报，避免上弦环节误判灰胎完成
+  const settledRows = buildRows(lacquerStore.layers, lacquerStore.receipts).filter((r) => isSettled(r.state) && r.layer);
+  settledRows.forEach(({ layer }) => {
     list.push({
-      label: `髹漆第 ${layer.seq} 遍 · ${layer.guqinNo}`,
-      at: formatDate(layer.appliedAt),
-      text: `配比 ${layer.mixRatio}，本遍 ${layer.layerThickness}mm，累计 ${layer.totalThickness}mm，荫房 ${layer.curingTemp}℃ / ${layer.curingHumidity}%，${layer.polishGrit} 目`,
-      type: 'warning',
+      label: `髹漆第 ${layer!.seq} 遍 · ${layer!.guqinNo}`,
+      at: formatDate(layer!.appliedAt),
+      text: `${layer!.source === 'outsource' ? '外协核销 · ' : ''}配比 ${layer!.mixRatio}，本遍 ${layer!.layerThickness}mm，累计 ${layer!.totalThickness}mm，荫房 ${layer!.curingTemp}℃ / ${layer!.curingHumidity}%，${layer!.polishGrit} 目`,
+      type: layer!.source === 'outsource' ? 'primary' : 'warning',
     });
   });
   stringingStore.stringings.forEach((stringing) => {
@@ -101,7 +104,11 @@ const events = computed<TimelineEvent[]>(() => {
       <template #header>
         <div class="card-head">
           <span>阶段统计（已完成琴坯数）</span>
-          <span class="card-note">板材 {{ boardStore.boards.length }} 块（可用 {{ boardStore.usableCount }} 块）· 髹漆 {{ lacquerStore.layers.length }} 遍 · 荫房异常 {{ lacquerStore.outOfRangeCount }} 遍</span>
+          <span class="card-note">
+            板材 {{ boardStore.boards.length }} 块（可用 {{ boardStore.usableCount }} 块）· 髹漆 {{ lacquerStore.layers.length }} 遍
+            <template v-if="lacquerStore.pendingCount"> · 待复核 {{ lacquerStore.pendingCount }} 遍（不计累计）</template>
+            · 荫房异常 {{ lacquerStore.outOfRangeCount }} 遍
+          </span>
         </div>
       </template>
       <el-row :gutter="12">
