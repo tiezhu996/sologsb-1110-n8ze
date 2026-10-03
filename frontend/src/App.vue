@@ -8,19 +8,23 @@ import { downloadText, exportBackupJson } from './utils/export';
 import { useBoardStore } from './stores/boardStore';
 import { useChamberStore } from './stores/chamberStore';
 import { useLacquerStore } from './stores/lacquerStore';
+import { useReceiptStore } from './stores/receiptStore';
 import { useStringingStore } from './stores/stringingStore';
 
 const route = useRoute();
 const boardStore = useBoardStore();
 const chamberStore = useChamberStore();
 const lacquerStore = useLacquerStore();
+const receiptStore = useReceiptStore();
 const stringingStore = useStringingStore();
 const ready = ref(false);
 
 onMounted(async () => {
   try {
     await seedIfEmpty();
-    await Promise.all([boardStore.hydrate(), chamberStore.hydrate(), lacquerStore.hydrate(), stringingStore.hydrate()]);
+    await Promise.all([boardStore.hydrate(), chamberStore.hydrate(), lacquerStore.hydrate(), receiptStore.hydrate(), stringingStore.hydrate()]);
+    // 回执进入髹漆 store 对账视图
+    lacquerStore.syncReceipts(receiptStore.receipts);
   } catch (error) {
     ElMessage.error(`本地数据装载失败：${(error as Error).message}`);
   } finally {
@@ -47,6 +51,7 @@ async function handleExport() {
         <el-menu-item index="/boards">板材登记</el-menu-item>
         <el-menu-item index="/chambers">槽腹尺寸</el-menu-item>
         <el-menu-item index="/lacquer">灰胎髹漆</el-menu-item>
+        <el-menu-item index="/outsourced">外协核销</el-menu-item>
         <el-menu-item index="/stringing">上弦评价</el-menu-item>
       </el-menu>
     </el-aside>

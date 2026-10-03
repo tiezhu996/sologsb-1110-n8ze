@@ -3,6 +3,7 @@ import WorkshopBoard from '../pages/WorkshopBoard.vue';
 import BoardList from '../pages/BoardList.vue';
 import ChamberEditor from '../pages/ChamberEditor.vue';
 import LacquerLedger from '../pages/LacquerLedger.vue';
+import OutsourcedLedger from '../pages/OutsourcedLedger.vue';
 import StringingLog from '../pages/StringingLog.vue';
 
 /** 全部路由：琴坯进度 + 板材 / 槽腹 / 髹漆 / 上弦 */
@@ -11,6 +12,7 @@ export const routes: RouteRecordRaw[] = [
   { path: '/boards', name: 'boards', component: BoardList, meta: { title: '板材登记与配对' } },
   { path: '/chambers', name: 'chambers', component: ChamberEditor, meta: { title: '槽腹尺寸记录' } },
   { path: '/lacquer', name: 'lacquer', component: LacquerLedger, meta: { title: '灰胎髹漆遍次' } },
+  { path: '/outsourced', name: 'outsourced', component: OutsourcedLedger, meta: { title: '外协回执核销' } },
   { path: '/stringing', name: 'stringing', component: StringingLog, meta: { title: '上弦与音色评价' } },
   { path: '/:pathMatch(.*)*', name: 'not-found', component: () => import('../pages/NotFound.vue'), meta: { title: '页面不存在' } },
 ];

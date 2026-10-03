@@ -2,8 +2,9 @@ import { db } from './db';
 import type { WoodBoard } from '../types/wood-board';
 import type { SoundChamber } from '../types/sound-chamber';
 import type { LacquerLayer } from '../types/lacquer-layer';
+import type { OutsourcedReceipt } from '../types/outsourced';
 import type { Stringing } from '../types/stringing';
-import { cumulativeThickness } from './layer';
+import { recalcTotals } from './recalc';
 
 const DAY = 86_400_000;
 const daysAgo = (n: number) => new Date(Date.now() - n * DAY).toISOString();
@@ -54,6 +55,7 @@ function buildSeedLayers(): LacquerLayer[] {
       id: `layer-${String(index + 1).padStart(3, '0')}`,
       guqinNo,
       seq,
+      // 不带 source：演示「历史遍次缺来源标记按本坊记录兼容」
       mixRatio,
       curingTemp: temp,
       curingHumidity: humidity,
@@ -62,23 +64,74 @@ function buildSeedLayers(): LacquerLayer[] {
       totalThickness: 0,
       appliedAt: daysAgo(days),
       operator,
-    };
+    } as LacquerLayer;
   });
 }
 
-/** 重新计算每张琴的累计厚度（写入本地库前的派生值） */
-export function withCumulative(layers: LacquerLayer[]): LacquerLayer[] {
-  const byGuqin = new Map<string, LacquerLayer[]>();
-  layers.forEach((layer) => {
-    const list = byGuqin.get(layer.guqinNo) ?? [];
-    list.push(layer);
-    byGuqin.set(layer.guqinNo, list);
-  });
-  return layers.map((layer) => ({
-    ...layer,
-    totalThickness: cumulativeThickness(byGuqin.get(layer.guqinNo) ?? [], layer.seq),
-  }));
-}
+/**
+ * 示例外协回执：
+ * - Q-2501 第1遍：与本坊一致，正常核销
+ * - Q-2501 第2遍：回执厚度与本坊不符，待复核（未决不计入累计）
+ * - Q-2503 第2遍：外协中途退出，以本坊记录为准
+ * - Q-2502 第5遍：地方批号遍次对不上，本坊无此遍，待复核
+ */
+export const SEED_RECEIPTS: OutsourcedReceipt[] = [
+  {
+    id: 'receipt-001',
+    receiptNo: 'WX-2509-01',
+    batchNo: 'DF-1107',
+    guqinNo: 'Q-2501',
+    seq: 1,
+    layerThickness: 0.12,
+    mixRatio: '1:1',
+    appliedAt: daysAgo(70),
+    workshop: '永嘉外协漆坊·阿福',
+    status: 'active',
+    receivedAt: daysAgo(68),
+  },
+  {
+    id: 'receipt-002',
+    receiptNo: 'WX-2509-02',
+    batchNo: 'DF-1107',
+    guqinNo: 'Q-2501',
+    seq: 2,
+    layerThickness: 0.13,
+    mixRatio: '1:1',
+    appliedAt: daysAgo(58),
+    workshop: '永嘉外协漆坊·阿福',
+    status: 'active',
+    receivedAt: daysAgo(56),
+    remark: '回执厚度与本坊实测 0.10mm 不一致',
+  },
+  {
+    id: 'receipt-003',
+    receiptNo: 'WX-2510-07',
+    batchNo: 'DF-1133',
+    guqinNo: 'Q-2503',
+    seq: 2,
+    layerThickness: 0.1,
+    mixRatio: '1:1.2',
+    appliedAt: daysAgo(33),
+    workshop: '瓯宁漆坊·中途退出',
+    status: 'withdrawn',
+    receivedAt: daysAgo(31),
+    remark: '漆坊撤单，以本坊记录为准',
+  },
+  {
+    id: 'receipt-004',
+    receiptNo: 'WX-2510-12',
+    batchNo: 'DF-1140',
+    guqinNo: 'Q-2502',
+    seq: 5,
+    layerThickness: 0.07,
+    mixRatio: '纯生漆',
+    appliedAt: daysAgo(8),
+    workshop: '永嘉外协漆坊·阿福',
+    status: 'active',
+    receivedAt: daysAgo(6),
+    remark: '地方批号遍次与本坊台账对不上',
+  },
+];
 
 export const SEED_STRINGINGS: Stringing[] = [
   {
@@ -136,19 +189,25 @@ export async function seedIfEmpty(): Promise<void> {
   if (flag) {
     return;
   }
-  const [boardCount, chamberCount, lacquerCount, stringingCount] = await Promise.all([
+  const [boardCount, chamberCount, lacquerCount, receiptCount, stringingCount] = await Promise.all([
     db.boards.count(),
     db.chambers.count(),
     db.lacquers.count(),
+    db.receipts.count(),
     db.stringings.count(),
   ]);
-  const layers = withCumulative(buildSeedLayers());
 
-  await db.transaction('rw', db.boards, db.chambers, db.lacquers, db.stringings, db.meta, async () => {
+  await db.transaction('rw', [db.boards, db.chambers, db.lacquers, db.receipts, db.stringings, db.meta], async () => {
+    const seedLayers = buildSeedLayers();
     if (boardCount === 0) await db.boards.bulkPut(SEED_BOARDS);
     if (chamberCount === 0) await db.chambers.bulkPut(SEED_CHAMBERS);
-    if (lacquerCount === 0) await db.lacquers.bulkPut(layers);
+    if (lacquerCount === 0) await db.lacquers.bulkPut(seedLayers);
+    if (receiptCount === 0) await db.receipts.bulkPut(SEED_RECEIPTS);
     if (stringingCount === 0) await db.stringings.bulkPut(SEED_STRINGINGS);
+    // 按对账结果回填各遍累计厚度（未决遍次不计入）
+    const layers = lacquerCount === 0 ? seedLayers : await db.lacquers.toArray();
+    const receipts = receiptCount === 0 ? SEED_RECEIPTS : await db.receipts.toArray();
+    await recalcTotals(undefined, { layers, receipts });
     await db.meta.put({ key: 'seeded', value: new Date().toISOString() });
   });
 }

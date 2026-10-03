@@ -2,8 +2,9 @@ import { computed } from 'vue';
 import { useBoardStore } from '../stores/boardStore';
 import { useChamberStore } from '../stores/chamberStore';
 import { useLacquerStore } from '../stores/lacquerStore';
+import { useReceiptStore } from '../stores/receiptStore';
 import { useStringingStore } from '../stores/stringingStore';
-import { cumulativeThickness } from '../utils/layer';
+import { effectiveCumulativeOf, grayBodyReady, openRowsOf } from '../utils/reconcile';
 
 export type StageKey = 'select' | 'carve' | 'lacquer' | 'string';
 
@@ -22,7 +23,10 @@ export interface StageProgress {
   ratio: number;
   /** 缺失项 */
   missing: string[];
+  /** 可核销累计厚度（mm，未决遍次不计入） */
   cumulativeMm: number;
+  /** 未决核销（待复核 / 遍次对不上）条数 */
+  openRecon: number;
 }
 
 export const STAGE_LABELS: Record<StageKey, string> = {
@@ -32,17 +36,17 @@ export const STAGE_LABELS: Record<StageKey, string> = {
   string: '上弦',
 };
 
-/** 灰胎完工目标累计厚度（mm） */
-const TARGET_MM = 1.0;
-
 /**
  * 按选材/掏膛/灰胎/上弦计算每张琴的阶段推进比与缺失项。
- * 选材：面板与底板配对齐全；掏膛：有槽腹记录；灰胎：累计厚度达标；上弦：有上弦记录。
+ * 选材：面板与底板配对齐全；掏膛：有槽腹记录；
+ * 灰胎：无未决核销且可核销累计厚度达标（未决遍次不参与累计）；
+ * 上弦：有上弦记录，且不允许在灰胎核销未决时当作灰胎已完成。
  */
 export function useStageProgress() {
   const boardStore = useBoardStore();
   const chamberStore = useChamberStore();
   const lacquerStore = useLacquerStore();
+  const receiptStore = useReceiptStore();
   const stringingStore = useStringingStore();
 
   const guqinNos = computed(() => {
@@ -50,6 +54,7 @@ export function useStageProgress() {
     boardStore.boards.forEach((b) => set.add(b.guqinNo));
     chamberStore.chambers.forEach((c) => set.add(c.guqinNo));
     lacquerStore.layers.forEach((l) => set.add(l.guqinNo));
+    receiptStore.receipts.forEach((r) => set.add(r.guqinNo));
     stringingStore.stringings.forEach((s) => set.add(s.guqinNo));
     return Array.from(set).sort();
   });
@@ -61,9 +66,20 @@ export function useStageProgress() {
       const base = boards.find((b) => b.part === '底板');
       const chamber = chamberStore.chambers.find((c) => c.guqinNo === guqinNo);
       const layers = lacquerStore.layers.filter((l) => l.guqinNo === guqinNo);
-      const total = cumulativeThickness(layers);
+      const receipts = receiptStore.receipts.filter((r) => r.guqinNo === guqinNo);
+      const total = effectiveCumulativeOf(guqinNo, lacquerStore.layers, receiptStore.receipts);
+      const openRows = openRowsOf(guqinNo, lacquerStore.layers, receiptStore.receipts);
+      const ready = grayBodyReady(guqinNo, lacquerStore.layers, receiptStore.receipts);
       const stringing = stringingStore.stringings.find((s) => s.guqinNo === guqinNo);
       const species = panel?.species ?? base?.species ?? '';
+
+      const lacquerDetail = ready
+        ? `${layers.length} 遍核销累计 ${total.toFixed(2)}mm，灰胎完工`
+        : openRows.length
+          ? `${openRows.length} 遍核销未决，可核销累计 ${total.toFixed(2)}mm（未决不计入）`
+          : layers.length
+            ? `${layers.length} 遍，可核销累计 ${total.toFixed(2)}mm / 目标 1.00mm`
+            : '尚未髹漆';
 
       const stages: StageItem[] = [
         {
@@ -81,14 +97,19 @@ export function useStageProgress() {
         {
           key: 'lacquer',
           label: STAGE_LABELS.lacquer,
-          done: total >= TARGET_MM,
-          detail: layers.length ? `${layers.length} 遍，累计 ${total.toFixed(2)}mm / 目标 ${TARGET_MM}mm` : '尚未髹漆',
+          done: ready,
+          detail: lacquerDetail,
         },
         {
           key: 'string',
           label: STAGE_LABELS.string,
-          done: Boolean(stringing),
-          detail: stringing ? `${stringing.stringType}，弦距 ${stringing.stringGap}mm` : '尚未上弦',
+          // 有上弦记录且灰胎核销已完工才算完成；核销未决时不能把上弦当成灰胎完成的信号
+          done: Boolean(stringing) && ready,
+          detail: stringing
+            ? ready
+              ? `${stringing.stringType}，弦距 ${stringing.stringGap}mm`
+              : '已上弦，但灰胎核销未决，不计完工'
+            : '尚未上弦',
         },
       ];
 
@@ -100,6 +121,7 @@ export function useStageProgress() {
         ratio: Math.round((doneCount / stages.length) * 100),
         missing: stages.filter((s) => !s.done).map((s) => s.label),
         cumulativeMm: Number(total.toFixed(2)),
+        openRecon: openRows.length,
       };
     }),
   );

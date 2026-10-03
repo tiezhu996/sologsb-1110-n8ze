@@ -8,8 +8,10 @@ import { useStageProgress, STAGE_LABELS, type StageKey } from '../hooks/useStage
 import { useBoardStore } from '../stores/boardStore';
 import { useChamberStore } from '../stores/chamberStore';
 import { useLacquerStore } from '../stores/lacquerStore';
+import { useReceiptStore } from '../stores/receiptStore';
 import { useStringingStore } from '../stores/stringingStore';
 import { formatDate } from '../utils/layer';
+import { isEffectiveRow } from '../utils/reconcile';
 import { WOOD_SPECIES } from '../types/wood-board';
 import type { TimelineEvent } from '../types/ui';
 
@@ -17,6 +19,7 @@ const route = useRoute();
 const boardStore = useBoardStore();
 const chamberStore = useChamberStore();
 const lacquerStore = useLacquerStore();
+const receiptStore = useReceiptStore();
 const stringingStore = useStringingStore();
 const { progressList, summary } = useStageProgress();
 
@@ -54,12 +57,25 @@ const events = computed<TimelineEvent[]>(() => {
       type: 'primary',
     });
   });
+  const reconMap = new Map(
+    lacquerStore.reconRows.map((row) => [`${row.guqinNo}#${row.seq}`, row]),
+  );
   lacquerStore.layers.forEach((layer) => {
+    const row = reconMap.get(`${layer.guqinNo}#${layer.seq}`);
+    const pending = row ? !isEffectiveRow(row) : false;
     list.push({
-      label: `髹漆第 ${layer.seq} 遍 · ${layer.guqinNo}`,
+      label: `髹漆第 ${layer.seq} 遍 · ${layer.guqinNo}${pending ? '（待复核·不计累计）' : ''}`,
       at: formatDate(layer.appliedAt),
-      text: `配比 ${layer.mixRatio}，本遍 ${layer.layerThickness}mm，累计 ${layer.totalThickness}mm，荫房 ${layer.curingTemp}℃ / ${layer.curingHumidity}%，${layer.polishGrit} 目`,
-      type: 'warning',
+      text: `配比 ${layer.mixRatio}，本遍 ${layer.layerThickness}mm，累计 ${pending ? '—' : layer.totalThickness + 'mm'}，荫房 ${layer.curingTemp}℃ / ${layer.curingHumidity}%，${layer.polishGrit} 目`,
+      type: pending ? 'danger' : 'warning',
+    });
+  });
+  receiptStore.receipts.forEach((receipt) => {
+    list.push({
+      label: `外协回执 ${receipt.receiptNo} · ${receipt.guqinNo}第${receipt.seq}遍`,
+      at: formatDate(receipt.receivedAt),
+      text: `批号 ${receipt.batchNo}，${receipt.status === 'withdrawn' ? '已中途退出，以本坊为准' : `${receipt.layerThickness}mm / ${receipt.mixRatio} / 施工 ${formatDate(receipt.appliedAt)}`}，${receipt.workshop}`,
+      type: receipt.status === 'withdrawn' ? 'info' : 'primary',
     });
   });
   stringingStore.stringings.forEach((stringing) => {
@@ -70,7 +86,7 @@ const events = computed<TimelineEvent[]>(() => {
       type: 'success',
     });
   });
-  return list.sort((a, b) => b.at.localeCompare(a.at)).slice(0, 8);
+  return list.sort((a, b) => b.at.localeCompare(a.at)).slice(0, 12);
 });
 </script>
 
@@ -101,7 +117,7 @@ const events = computed<TimelineEvent[]>(() => {
       <template #header>
         <div class="card-head">
           <span>阶段统计（已完成琴坯数）</span>
-          <span class="card-note">板材 {{ boardStore.boards.length }} 块（可用 {{ boardStore.usableCount }} 块）· 髹漆 {{ lacquerStore.layers.length }} 遍 · 荫房异常 {{ lacquerStore.outOfRangeCount }} 遍</span>
+          <span class="card-note">板材 {{ boardStore.boards.length }} 块（可用 {{ boardStore.usableCount }} 块）· 髹漆 {{ lacquerStore.layers.length }} 遍 · 外协回执 {{ receiptStore.receipts.length }} 张 · 核销未决 {{ lacquerStore.openCount }} 遍 · 荫房异常 {{ lacquerStore.outOfRangeCount }} 遍</span>
         </div>
       </template>
       <el-row :gutter="12">
@@ -155,7 +171,10 @@ const events = computed<TimelineEvent[]>(() => {
           </template>
         </el-table-column>
         <el-table-column label="累计灰胎(mm)" width="120">
-          <template #default="scope">{{ scope.row.cumulativeMm.toFixed(2) }}</template>
+          <template #default="scope">
+            <span>{{ scope.row.cumulativeMm.toFixed(2) }}</span>
+            <el-tag v-if="scope.row.openRecon" type="danger" size="small" class="open-tag">未决{{ scope.row.openRecon }}</el-tag>
+          </template>
         </el-table-column>
       </el-table>
     </el-card>
@@ -203,5 +222,8 @@ const events = computed<TimelineEvent[]>(() => {
 .missing {
   color: #c62828;
   font-size: 13px;
+}
+.open-tag {
+  margin-left: 6px;
 }
 </style>

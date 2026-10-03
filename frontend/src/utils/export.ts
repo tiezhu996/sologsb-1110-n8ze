@@ -1,4 +1,5 @@
 import { db, SCHEMA_VERSION } from './db';
+import { recalcTotals } from './recalc';
 
 export interface BackupPayload {
   app: string;
@@ -7,15 +8,17 @@ export interface BackupPayload {
   boards: unknown[];
   chambers: unknown[];
   lacquers: unknown[];
+  receipts: unknown[];
   stringings: unknown[];
 }
 
 /** 汇总全部本地表为 JSON 备份（schema 迁移前先导出） */
 export async function buildBackup(): Promise<BackupPayload> {
-  const [boards, chambers, lacquers, stringings] = await Promise.all([
+  const [boards, chambers, lacquers, receipts, stringings] = await Promise.all([
     db.boards.toArray(),
     db.chambers.toArray(),
     db.lacquers.toArray(),
+    db.receipts.toArray(),
     db.stringings.toArray(),
   ]);
   return {
@@ -25,6 +28,7 @@ export async function buildBackup(): Promise<BackupPayload> {
     boards,
     chambers,
     lacquers,
+    receipts,
     stringings,
   };
 }
@@ -55,11 +59,11 @@ export function downloadCsv<T extends Record<string, unknown>>(
   const body = rows
     .map((row) => columns.map((c) => `"${String(row[c.key] ?? '').replace(/"/g, '""')}"`).join(','))
     .join('\n');
-  downloadText(filename, `\ufeff${header}\n${body}`, 'text/csv');
+  downloadText(filename, `﻿${header}\n${body}`, 'text/csv');
 }
 
 /** 恢复 JSON 备份 */
-export async function importBackup(text: string): Promise<{ boards: number; chambers: number; lacquers: number; stringings: number }> {
+export async function importBackup(text: string): Promise<{ boards: number; chambers: number; lacquers: number; receipts: number; stringings: number }> {
   const payload = JSON.parse(text) as Partial<BackupPayload>;
   if (!payload || payload.app !== 'gbguqin') {
     throw new Error('备份文件格式不匹配（缺少 app=gbguqin 标记）');
@@ -68,14 +72,26 @@ export async function importBackup(text: string): Promise<{ boards: number; cham
     boards: payload.boards?.length ?? 0,
     chambers: payload.chambers?.length ?? 0,
     lacquers: payload.lacquers?.length ?? 0,
+    receipts: payload.receipts?.length ?? 0,
     stringings: payload.stringings?.length ?? 0,
   };
-  await db.transaction('rw', db.boards, db.chambers, db.lacquers, db.stringings, async () => {
-    await Promise.all([db.boards.clear(), db.chambers.clear(), db.lacquers.clear(), db.stringings.clear()]);
+  await db.transaction('rw', [db.boards, db.chambers, db.lacquers, db.receipts, db.stringings], async () => {
+    await Promise.all([
+      db.boards.clear(),
+      db.chambers.clear(),
+      db.lacquers.clear(),
+      db.receipts.clear(),
+      db.stringings.clear(),
+    ]);
     if (payload.boards?.length) await db.boards.bulkPut(payload.boards as never[]);
     if (payload.chambers?.length) await db.chambers.bulkPut(payload.chambers as never[]);
     if (payload.lacquers?.length) await db.lacquers.bulkPut(payload.lacquers as never[]);
+    if (payload.receipts?.length) await db.receipts.bulkPut(payload.receipts as never[]);
     if (payload.stringings?.length) await db.stringings.bulkPut(payload.stringings as never[]);
+    // 恢复后按双边来源重新对账、重算累计厚度，不信任备份内的 totalThickness
+    const layers = (payload.lacquers ?? []) as unknown[];
+    const receipts = (payload.receipts ?? []) as unknown[];
+    await recalcTotals(undefined, { layers: layers as never[], receipts: receipts as never[] });
   });
   return counts;
 }

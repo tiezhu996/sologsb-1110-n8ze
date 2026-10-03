@@ -6,8 +6,11 @@ import FilterBar from '../components/common/FilterBar.vue';
 import EmptyPanel from '../components/common/EmptyPanel.vue';
 import ToneTextEditor from '../components/common/ToneTextEditor.vue';
 import { useStringingStore } from '../stores/stringingStore';
+import { useLacquerStore } from '../stores/lacquerStore';
+import { useReceiptStore } from '../stores/receiptStore';
 import { useBoardStore } from '../stores/boardStore';
 import { formatDate } from '../utils/layer';
+import { stringingBlockers } from '../utils/reconcile';
 import {
   NINE_VIRTUES,
   STRING_DEFECTS,
@@ -20,6 +23,8 @@ import {
 
 const route = useRoute();
 const stringingStore = useStringingStore();
+const lacquerStore = useLacquerStore();
+const receiptStore = useReceiptStore();
 const boardStore = useBoardStore();
 
 const dialogVisible = ref(false);
@@ -107,9 +112,36 @@ function openEdit(stringing: Stringing) {
   dialogVisible.value = true;
 }
 
+/**
+ * 上弦前灰胎闸门：
+ * - 未决核销（待复核 / 遍次对不上）硬阻塞——不能把未核销灰胎当成完成；
+ * - 可核销累计厚度不达标给确认提示，仍可登记（现场可手工判断是否放行）。
+ */
 async function submit() {
   const ok = await formRef.value?.validate().catch(() => false);
   if (!ok) return;
+
+  // 新建上弦记录时执行灰胎闸门；编辑既有记录只改评语，不再拦
+  if (!editingId.value) {
+    const blockers = stringingBlockers(form.value.guqinNo, lacquerStore.layers, receiptStore.receipts);
+    const hard = blockers.filter((b) => b.startsWith('灰胎存在未决核销'));
+    const soft = blockers.filter((b) => !hard.includes(b));
+    if (hard.length) {
+      ElMessage.error(`不允许登记上弦：${hard.join('；')}。请先在「外协核销」中处理。`);
+      return;
+    }
+    if (soft.length) {
+      const proceed = await ElMessageBox.confirm(soft.join('\n'), '灰胎厚度未达标', {
+        type: 'warning',
+        confirmButtonText: '仍要登记',
+        cancelButtonText: '返回',
+      })
+        .then(() => true)
+        .catch(() => false);
+      if (!proceed) return;
+    }
+  }
+
   const payload = {
     guqinNo: form.value.guqinNo,
     stringType: form.value.stringType,
